@@ -1,15 +1,18 @@
 # pragma pylint: disable=attribute-defined-outside-init
 
 """
-This module load custom hyperopts
+This module load custom hyperopt
 """
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict
 
-from freqtrade.constants import DEFAULT_HYPEROPT
+from freqtrade.constants import HYPEROPT_LOSS_BUILTIN, USERPATH_HYPEROPTS
+from freqtrade.exceptions import OperationalException
 from freqtrade.optimize.hyperopt_interface import IHyperOpt
+from freqtrade.optimize.hyperopt_loss_interface import IHyperOptLoss
 from freqtrade.resolvers import IResolver
+
 
 logger = logging.getLogger(__name__)
 
@@ -18,60 +21,68 @@ class HyperOptResolver(IResolver):
     """
     This class contains all the logic to load custom hyperopt class
     """
+    object_type = IHyperOpt
+    object_type_str = "Hyperopt"
+    user_subdir = USERPATH_HYPEROPTS
+    initial_search_path = None
 
-    __slots__ = ['hyperopt']
+    @staticmethod
+    def load_hyperopt(config: Dict) -> IHyperOpt:
+        """
+        Load the custom hyperopt class from config parameter
+        :param config: configuration dictionary
+        """
+        if not config.get('hyperopt'):
+            raise OperationalException("No Hyperopt set. Please use `--hyperopt` to specify "
+                                       "the Hyperopt class to use.")
 
-    def __init__(self, config: Optional[Dict] = None) -> None:
+        hyperopt_name = config['hyperopt']
+
+        hyperopt = HyperOptResolver.load_object(hyperopt_name, config,
+                                                kwargs={'config': config},
+                                                extra_dir=config.get('hyperopt_path'))
+
+        if not hasattr(hyperopt, 'populate_indicators'):
+            logger.info("Hyperopt class does not provide populate_indicators() method. "
+                        "Using populate_indicators from the strategy.")
+        if not hasattr(hyperopt, 'populate_buy_trend'):
+            logger.info("Hyperopt class does not provide populate_buy_trend() method. "
+                        "Using populate_buy_trend from the strategy.")
+        if not hasattr(hyperopt, 'populate_sell_trend'):
+            logger.info("Hyperopt class does not provide populate_sell_trend() method. "
+                        "Using populate_sell_trend from the strategy.")
+        return hyperopt
+
+
+class HyperOptLossResolver(IResolver):
+    """
+    This class contains all the logic to load custom hyperopt loss class
+    """
+    object_type = IHyperOptLoss
+    object_type_str = "HyperoptLoss"
+    user_subdir = USERPATH_HYPEROPTS
+    initial_search_path = Path(__file__).parent.parent.joinpath('optimize').resolve()
+
+    @staticmethod
+    def load_hyperoptloss(config: Dict) -> IHyperOptLoss:
         """
         Load the custom class from config parameter
-        :param config: configuration dictionary or None
+        :param config: configuration dictionary
         """
-        config = config or {}
 
-        # Verify the hyperopt is in the configuration, otherwise fallback to the default hyperopt
-        hyperopt_name = config.get('hyperopt') or DEFAULT_HYPEROPT
-        self.hyperopt = self._load_hyperopt(hyperopt_name, extra_dir=config.get('hyperopt_path'))
+        hyperoptloss_name = config.get('hyperopt_loss')
+        if not hyperoptloss_name:
+            raise OperationalException(
+                "No Hyperopt loss set. Please use `--hyperopt-loss` to "
+                "specify the Hyperopt-Loss class to use.\n"
+                f"Built-in Hyperopt-loss-functions are: {', '.join(HYPEROPT_LOSS_BUILTIN)}"
+            )
+        hyperoptloss = HyperOptLossResolver.load_object(hyperoptloss_name,
+                                                        config, kwargs={},
+                                                        extra_dir=config.get('hyperopt_path'))
 
-        # Assign ticker_interval to be used in hyperopt
-        self.hyperopt.__class__.ticker_interval = str(config['ticker_interval'])
+        # Assign timeframe to be used in hyperopt
+        hyperoptloss.__class__.ticker_interval = str(config['timeframe'])
+        hyperoptloss.__class__.timeframe = str(config['timeframe'])
 
-        if not hasattr(self.hyperopt, 'populate_buy_trend'):
-            logger.warning("Custom Hyperopt does not provide populate_buy_trend. "
-                           "Using populate_buy_trend from DefaultStrategy.")
-        if not hasattr(self.hyperopt, 'populate_sell_trend'):
-            logger.warning("Custom Hyperopt does not provide populate_sell_trend. "
-                           "Using populate_sell_trend from DefaultStrategy.")
-
-    def _load_hyperopt(
-            self, hyperopt_name: str, extra_dir: Optional[str] = None) -> IHyperOpt:
-        """
-        Search and loads the specified hyperopt.
-        :param hyperopt_name: name of the module to import
-        :param extra_dir: additional directory to search for the given hyperopt
-        :return: HyperOpt instance or None
-        """
-        current_path = Path(__file__).parent.parent.joinpath('optimize').resolve()
-
-        abs_paths = [
-            current_path.parent.parent.joinpath('user_data/hyperopts'),
-            current_path,
-        ]
-
-        if extra_dir:
-            # Add extra hyperopt directory on top of search paths
-            abs_paths.insert(0, Path(extra_dir))
-
-        for _path in abs_paths:
-            try:
-                hyperopt = self._search_object(directory=_path, object_type=IHyperOpt,
-                                               object_name=hyperopt_name)
-                if hyperopt:
-                    logger.info("Using resolved hyperopt %s from '%s'", hyperopt_name, _path)
-                    return hyperopt
-            except FileNotFoundError:
-                logger.warning('Path "%s" does not exist', _path.relative_to(Path.cwd()))
-
-        raise ImportError(
-            "Impossible to load Hyperopt '{}'. This class does not exist"
-            " or contains Python code errors".format(hyperopt_name)
-        )
+        return hyperoptloss
